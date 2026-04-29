@@ -1,6 +1,6 @@
 //! Types related to task management
 use super::TaskContext;
-use crate::config::TRAP_CONTEXT_BASE;
+use crate::config::{MAX_SYSCALL_NUM, TRAP_CONTEXT_BASE};
 use crate::mm::{
     kernel_stack_position, MapPermission, MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE,
 };
@@ -28,6 +28,9 @@ pub struct TaskControlBlock {
 
     /// Program break
     pub program_brk: usize,
+
+    /// Count how many times each syscall has been invoked by this task
+    syscall_times: [u32; MAX_SYSCALL_NUM],
 }
 
 impl TaskControlBlock {
@@ -63,6 +66,7 @@ impl TaskControlBlock {
             base_size: user_sp,
             heap_bottom: user_sp,
             program_brk: user_sp,
+            syscall_times: [0; MAX_SYSCALL_NUM],
         };
         // prepare TrapContext in user space
         let trap_cx = task_control_block.get_trap_cx();
@@ -95,6 +99,29 @@ impl TaskControlBlock {
         } else {
             None
         }
+    }
+    pub(super) fn record_syscall(&mut self, syscall_id: usize) {
+        if syscall_id < MAX_SYSCALL_NUM {
+            self.syscall_times[syscall_id] += 1;
+        }
+    }
+    pub(super) fn syscall_count(&self, syscall_id: usize) -> u32 {
+        if syscall_id < MAX_SYSCALL_NUM {
+            self.syscall_times[syscall_id]
+        } else {
+            0
+        }
+    }
+    pub(super) fn mmap(
+        &mut self,
+        start: VirtAddr,
+        end: VirtAddr,
+        permission: MapPermission,
+    ) -> bool {
+        self.memory_set.map_framed_area(start, end, permission)
+    }
+    pub(super) fn munmap(&mut self, start: VirtAddr, end: VirtAddr) -> bool {
+        self.memory_set.unmap_framed_area(start, end)
     }
 }
 

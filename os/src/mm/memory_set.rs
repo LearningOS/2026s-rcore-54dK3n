@@ -63,6 +63,51 @@ impl MemorySet {
             None,
         );
     }
+    /// Map a new framed area when every page in the target range is currently unmapped.
+    pub fn map_framed_area(
+        &mut self,
+        start_va: VirtAddr,
+        end_va: VirtAddr,
+        permission: MapPermission,
+    ) -> bool {
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            match self.translate(vpn) {
+                Some(pte) if pte.is_valid() => return false,
+                _ => {}
+            }
+        }
+        self.push(
+            MapArea::new(start_va, end_va, MapType::Framed, permission),
+            None,
+        );
+        true
+    }
+    /// Unmap the framed area that exactly matches the target range.
+    pub fn unmap_framed_area(&mut self, start_va: VirtAddr, end_va: VirtAddr) -> bool {
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            match self.translate(vpn) {
+                Some(pte) if pte.is_valid() => {}
+                _ => return false,
+            }
+        }
+        if let Some(index) = self.areas.iter().position(|area| {
+            area.map_type == MapType::Framed
+                && area.vpn_range.get_start() == start_vpn
+                && area.vpn_range.get_end() == end_vpn
+        }) {
+            // Remove the whole area from the bookkeeping vector first, then tear down
+            // page-table entries so the metadata and the actual mappings stay in sync.
+            let mut area = self.areas.remove(index);
+            area.unmap(&mut self.page_table);
+            true
+        } else {
+            false
+        }
+    }
     fn push(&mut self, mut map_area: MapArea, data: Option<&[u8]>) {
         map_area.map(&mut self.page_table);
         if let Some(data) = data {

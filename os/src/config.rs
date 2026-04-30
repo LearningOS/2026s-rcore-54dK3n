@@ -21,3 +21,7 @@ pub const TRAP_CONTEXT_BASE: usize = TRAMPOLINE - PAGE_SIZE;
 pub const CLOCK_FREQ: usize = 12500000;
 /// the physical memory end
 pub const MEMORY_END: usize = 0x88000000;
+/// MMIO base of the 16550-compatible UART on QEMU virt
+pub const UART0: usize = 0x1000_0000;
+/// mapped size of the UART MMIO region
+pub const UART0_SIZE: usize = 0x1000;

@@ -2,12 +2,16 @@
 
 #![allow(unused)]
 
+use crate::config::UART0;
 use core::arch::asm;
 
 const SBI_SET_TIMER: usize = 0;
-const SBI_CONSOLE_PUTCHAR: usize = 1;
-const SBI_CONSOLE_GETCHAR: usize = 2;
 const SBI_SHUTDOWN: usize = 8;
+const UART_RBR: usize = UART0;
+const UART_THR: usize = UART0;
+const UART_LSR: usize = UART0 + 5;
+const UART_LSR_DATA_READY: u8 = 1 << 0;
+const UART_LSR_THR_EMPTY: u8 = 1 << 5;
 
 /// general sbi call
 #[inline(always)]
@@ -33,12 +37,21 @@ pub fn set_timer(timer: usize) {
 
 /// use sbi call to putchar in console (qemu uart handler)
 pub fn console_putchar(c: usize) {
-    sbi_call(SBI_CONSOLE_PUTCHAR, c, 0, 0);
+    unsafe {
+        while (UART_LSR as *const u8).read_volatile() & UART_LSR_THR_EMPTY == 0 {}
+        (UART_THR as *mut u8).write_volatile(c as u8);
+    }
 }
 
 /// use sbi call to getchar from console (qemu uart handler)
 pub fn console_getchar() -> usize {
-    sbi_call(SBI_CONSOLE_GETCHAR, 0, 0, 0)
+    unsafe {
+        if (UART_LSR as *const u8).read_volatile() & UART_LSR_DATA_READY == 0 {
+            0
+        } else {
+            (UART_RBR as *const u8).read_volatile() as usize
+        }
+    }
 }
 
 /// use sbi call to shutdown the kernel

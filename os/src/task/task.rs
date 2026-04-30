@@ -2,7 +2,7 @@
 use super::TaskContext;
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
 use crate::config::TRAP_CONTEXT_BASE;
-use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
+use crate::mm::{MapPermission, MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
 use crate::trap::{trap_handler, TrapContext};
 use alloc::sync::{Arc, Weak};
@@ -63,6 +63,9 @@ pub struct TaskControlBlockInner {
     /// It is set when active exit or execution error occurs
     pub exit_code: i32,
 
+    /// The process priority set by `sys_set_priority`
+    pub priority: usize,
+
     /// Heap bottom
     pub heap_bottom: usize,
 
@@ -116,6 +119,7 @@ impl TaskControlBlock {
                     parent: None,
                     children: Vec::new(),
                     exit_code: 0,
+                    priority: 16,
                     heap_bottom: user_sp,
                     program_brk: user_sp,
                 })
@@ -192,6 +196,7 @@ impl TaskControlBlock {
                     parent: Some(Arc::downgrade(self)),
                     children: Vec::new(),
                     exit_code: 0,
+                    priority: parent_inner.priority,
                     heap_bottom: parent_inner.heap_bottom,
                     program_brk: parent_inner.program_brk,
                 })
@@ -207,6 +212,19 @@ impl TaskControlBlock {
         task_control_block
         // **** release child PCB
         // ---- release parent PCB
+    }
+
+    /// parent process spawns a child process from a fresh ELF image
+    pub fn spawn(self: &Arc<Self>, elf_data: &[u8]) -> Arc<Self> {
+        let mut parent_inner = self.inner_exclusive_access();
+        let child = Arc::new(TaskControlBlock::new(elf_data));
+        {
+            let mut child_inner = child.inner_exclusive_access();
+            child_inner.parent = Some(Arc::downgrade(self));
+            child_inner.priority = parent_inner.priority;
+        }
+        parent_inner.children.push(child.clone());
+        child
     }
 
     /// get pid of process
@@ -238,6 +256,25 @@ impl TaskControlBlock {
         } else {
             None
         }
+    }
+
+    /// Map a user framed area into the current task's address space.
+    pub fn mmap(&self, start: VirtAddr, end: VirtAddr, permission: MapPermission) -> bool {
+        self.inner_exclusive_access()
+            .memory_set
+            .map_framed_area(start, end, permission)
+    }
+
+    /// Unmap a user framed area from the current task's address space.
+    pub fn munmap(&self, start: VirtAddr, end: VirtAddr) -> bool {
+        self.inner_exclusive_access()
+            .memory_set
+            .unmap_framed_area(start, end)
+    }
+
+    /// Set the task priority used by later chapters' schedulers.
+    pub fn set_priority(&self, priority: usize) {
+        self.inner_exclusive_access().priority = priority;
     }
 }
 

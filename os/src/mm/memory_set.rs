@@ -3,7 +3,9 @@ use super::{frame_alloc, FrameTracker};
 use super::{PTEFlags, PageTable, PageTableEntry};
 use super::{PhysAddr, PhysPageNum, VirtAddr, VirtPageNum};
 use super::{StepByOne, VPNRange};
-use crate::config::{MEMORY_END, PAGE_SIZE, TRAMPOLINE, TRAP_CONTEXT_BASE, USER_STACK_SIZE};
+use crate::config::{
+    MEMORY_END, PAGE_SIZE, TRAMPOLINE, TRAP_CONTEXT_BASE, UART0, UART0_SIZE, USER_STACK_SIZE,
+};
 use crate::sync::UPSafeCell;
 use alloc::collections::BTreeMap;
 use alloc::sync::Arc;
@@ -59,6 +61,49 @@ impl MemorySet {
             MapArea::new(start_va, end_va, MapType::Framed, permission),
             None,
         );
+    }
+    /// Map a new framed area when every page in the target range is currently unmapped.
+    pub fn map_framed_area(
+        &mut self,
+        start_va: VirtAddr,
+        end_va: VirtAddr,
+        permission: MapPermission,
+    ) -> bool {
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            match self.translate(vpn) {
+                Some(pte) if pte.is_valid() => return false,
+                _ => {}
+            }
+        }
+        self.push(
+            MapArea::new(start_va, end_va, MapType::Framed, permission),
+            None,
+        );
+        true
+    }
+    /// Unmap the framed area that exactly matches the target range.
+    pub fn unmap_framed_area(&mut self, start_va: VirtAddr, end_va: VirtAddr) -> bool {
+        let start_vpn = start_va.floor();
+        let end_vpn = end_va.ceil();
+        for vpn in VPNRange::new(start_vpn, end_vpn) {
+            match self.translate(vpn) {
+                Some(pte) if pte.is_valid() => {}
+                _ => return false,
+            }
+        }
+        if let Some(index) = self.areas.iter().position(|area| {
+            area.map_type == MapType::Framed
+                && area.vpn_range.get_start() == start_vpn
+                && area.vpn_range.get_end() == end_vpn
+        }) {
+            let mut area = self.areas.remove(index);
+            area.unmap(&mut self.page_table);
+            true
+        } else {
+            false
+        }
     }
     /// remove a area
     pub fn remove_area_with_start_vpn(&mut self, start_vpn: VirtPageNum) {
@@ -148,6 +193,16 @@ impl MemorySet {
             MapArea::new(
                 (ekernel as usize).into(),
                 MEMORY_END.into(),
+                MapType::Identical,
+                MapPermission::R | MapPermission::W,
+            ),
+            None,
+        );
+        info!("mapping uart");
+        memory_set.push(
+            MapArea::new(
+                UART0.into(),
+                (UART0 + UART0_SIZE).into(),
                 MapType::Identical,
                 MapPermission::R | MapPermission::W,
             ),

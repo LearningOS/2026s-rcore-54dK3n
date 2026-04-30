@@ -149,14 +149,21 @@ pub fn sys_semaphore_up(sem_id: usize) -> isize {
         let process_inner = process.inner_exclusive_access();
         Arc::clone(process_inner.semaphore_list[sem_id].as_ref().unwrap())
     };
+    let woken_tid = {
+        let woken_task = sem.up();
+        woken_task.map(|task| task.inner_exclusive_access().res.as_ref().unwrap().tid)
+    };
     {
         let mut process_inner = process.inner_exclusive_access();
         process_inner.ensure_sync_tracking();
         if process_inner.semaphore_allocations[tid][sem_id] > 0 {
             process_inner.semaphore_allocations[tid][sem_id] -= 1;
         }
+        if let Some(woken_tid) = woken_tid {
+            process_inner.semaphore_requests[woken_tid] = None;
+            process_inner.semaphore_allocations[woken_tid][sem_id] += 1;
+        }
     }
-    sem.up();
     0
 }
 /// semaphore down syscall
@@ -179,10 +186,11 @@ pub fn sys_semaphore_down(sem_id: usize) -> isize {
         let process_inner = process.inner_exclusive_access();
         Arc::clone(process_inner.semaphore_list[sem_id].as_ref().unwrap())
     };
+    let will_block = sem.inner.exclusive_access().count <= 0;
     {
         let mut process_inner = process.inner_exclusive_access();
         process_inner.ensure_sync_tracking();
-        if process_inner.deadlock_detect_enabled && sem.inner.exclusive_access().count <= 0 {
+        if process_inner.deadlock_detect_enabled && will_block {
             process_inner.semaphore_requests[tid] = Some(sem_id);
             let sem_count = process_inner.semaphore_list.len();
             let task_count = process_inner.tasks.len();
@@ -234,8 +242,10 @@ pub fn sys_semaphore_down(sem_id: usize) -> isize {
     sem.down();
     let mut process_inner = process.inner_exclusive_access();
     process_inner.ensure_sync_tracking();
-    process_inner.semaphore_requests[tid] = None;
-    process_inner.semaphore_allocations[tid][sem_id] += 1;
+    if !will_block {
+        process_inner.semaphore_requests[tid] = None;
+        process_inner.semaphore_allocations[tid][sem_id] += 1;
+    }
     0
 }
 /// condvar create syscall

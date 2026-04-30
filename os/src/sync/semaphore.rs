@@ -30,15 +30,18 @@ impl Semaphore {
     }
 
     /// up operation of semaphore
-    pub fn up(&self) {
+    pub fn up(&self) -> Option<Arc<TaskControlBlock>> {
         trace!("kernel: Semaphore::up");
         let mut inner = self.inner.exclusive_access();
         inner.count += 1;
         if inner.count <= 0 {
             if let Some(task) = inner.wait_queue.pop_front() {
+                let task_clone = task.clone();
                 wakeup_task(task);
+                return Some(task_clone);
             }
         }
+        None
     }
 
     /// down operation of semaphore

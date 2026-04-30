@@ -73,8 +73,7 @@ pub fn sys_mutex_lock(mutex_id: usize) -> isize {
     let mutex = Arc::clone(process_inner.mutex_list[mutex_id].as_ref().unwrap());
     drop(process_inner);
     drop(process);
-    mutex.lock();
-    0
+    mutex.lock()
 }
 /// mutex unlock syscall
 pub fn sys_mutex_unlock(mutex_id: usize) -> isize {
@@ -127,6 +126,7 @@ pub fn sys_semaphore_create(res_count: usize) -> isize {
             .push(Some(Arc::new(Semaphore::new(res_count))));
         process_inner.semaphore_list.len() - 1
     };
+    process_inner.ensure_sync_tracking();
     id as isize
 }
 /// semaphore up syscall
@@ -142,10 +142,20 @@ pub fn sys_semaphore_up(sem_id: usize) -> isize {
             .unwrap()
             .tid
     );
+    let task = current_task().unwrap();
+    let tid = task.inner_exclusive_access().res.as_ref().unwrap().tid;
     let process = current_process();
-    let process_inner = process.inner_exclusive_access();
-    let sem = Arc::clone(process_inner.semaphore_list[sem_id].as_ref().unwrap());
-    drop(process_inner);
+    let sem = {
+        let process_inner = process.inner_exclusive_access();
+        Arc::clone(process_inner.semaphore_list[sem_id].as_ref().unwrap())
+    };
+    {
+        let mut process_inner = process.inner_exclusive_access();
+        process_inner.ensure_sync_tracking();
+        if process_inner.semaphore_allocations[tid][sem_id] > 0 {
+            process_inner.semaphore_allocations[tid][sem_id] -= 1;
+        }
+    }
     sem.up();
     0
 }
@@ -162,11 +172,70 @@ pub fn sys_semaphore_down(sem_id: usize) -> isize {
             .unwrap()
             .tid
     );
+    let task = current_task().unwrap();
+    let tid = task.inner_exclusive_access().res.as_ref().unwrap().tid;
     let process = current_process();
-    let process_inner = process.inner_exclusive_access();
-    let sem = Arc::clone(process_inner.semaphore_list[sem_id].as_ref().unwrap());
-    drop(process_inner);
+    let sem = {
+        let process_inner = process.inner_exclusive_access();
+        Arc::clone(process_inner.semaphore_list[sem_id].as_ref().unwrap())
+    };
+    {
+        let mut process_inner = process.inner_exclusive_access();
+        process_inner.ensure_sync_tracking();
+        if process_inner.deadlock_detect_enabled && sem.inner.exclusive_access().count <= 0 {
+            process_inner.semaphore_requests[tid] = Some(sem_id);
+            let sem_count = process_inner.semaphore_list.len();
+            let task_count = process_inner.tasks.len();
+            let mut work = alloc::vec![0usize; sem_count];
+            for (sid, sem) in process_inner.semaphore_list.iter().enumerate() {
+                if let Some(sem) = sem {
+                    let count = sem.inner.exclusive_access().count;
+                    if count > 0 {
+                        work[sid] = count as usize;
+                    }
+                }
+            }
+            let mut finish = alloc::vec![false; task_count];
+            loop {
+                let mut progressed = false;
+                for tid in 0..task_count {
+                    if finish[tid] {
+                        continue;
+                    }
+                    if process_inner.tasks[tid].is_none() {
+                        finish[tid] = true;
+                        progressed = true;
+                        continue;
+                    }
+                    let can_finish = match process_inner.semaphore_requests[tid] {
+                        Some(waiting_sem) => work[waiting_sem] > 0,
+                        None => true,
+                    };
+                    if can_finish {
+                        finish[tid] = true;
+                        progressed = true;
+                        if let Some(allocs) = process_inner.semaphore_allocations.get(tid) {
+                            for (sid, allocated) in allocs.iter().enumerate() {
+                                work[sid] += *allocated;
+                            }
+                        }
+                    }
+                }
+                if !progressed {
+                    break;
+                }
+            }
+            if (0..task_count).any(|tid| !finish[tid] && process_inner.tasks[tid].is_some()) {
+                process_inner.semaphore_requests[tid] = None;
+                return -0xdead;
+            }
+        }
+    }
     sem.down();
+    let mut process_inner = process.inner_exclusive_access();
+    process_inner.ensure_sync_tracking();
+    process_inner.semaphore_requests[tid] = None;
+    process_inner.semaphore_allocations[tid][sem_id] += 1;
     0
 }
 /// condvar create syscall
@@ -243,9 +312,16 @@ pub fn sys_condvar_wait(condvar_id: usize, mutex_id: usize) -> isize {
     0
 }
 /// enable deadlock detection syscall
-///
-/// YOUR JOB: Implement deadlock detection, but might not all in this syscall
 pub fn sys_enable_deadlock_detect(_enabled: usize) -> isize {
-    trace!("kernel: sys_enable_deadlock_detect NOT IMPLEMENTED");
-    -1
+    trace!("kernel: sys_enable_deadlock_detect");
+    let process = current_process();
+    let mut process_inner = process.inner_exclusive_access();
+    process_inner.deadlock_detect_enabled = _enabled != 0;
+    process_inner.ensure_sync_tracking();
+    if !process_inner.deadlock_detect_enabled {
+        for request in process_inner.semaphore_requests.iter_mut() {
+            *request = None;
+        }
+    }
+    0
 }

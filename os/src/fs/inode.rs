@@ -1,4 +1,4 @@
-use super::File;
+use super::{File, Stat, StatMode};
 use crate::drivers::BLOCK_DEVICE;
 use crate::mm::UserBuffer;
 use crate::sync::UPSafeCell;
@@ -63,6 +63,24 @@ pub fn list_apps() {
         println!("{}", app);
     }
     println!("**************/");
+}
+
+/// Create a hard link under the root directory.
+pub fn link_file(old_name: &str, new_name: &str) -> isize {
+    if ROOT_INODE.link(old_name, new_name) {
+        0
+    } else {
+        -1
+    }
+}
+
+/// Remove a directory entry from the root directory.
+pub fn unlink_file(name: &str) -> isize {
+    if ROOT_INODE.unlink(name) {
+        0
+    } else {
+        -1
+    }
 }
 
 bitflags! {
@@ -156,5 +174,19 @@ impl File for OSInode {
             total_write_size += write_size;
         }
         total_write_size
+    }
+    fn stat(&self) -> Option<Stat> {
+        let inner = self.inner.exclusive_access();
+        Some(Stat {
+            dev: 0,
+            ino: inner.inode.inode_id() as u64,
+            mode: if inner.inode.is_dir() {
+                StatMode::DIR
+            } else {
+                StatMode::FILE
+            },
+            nlink: inner.inode.link_count(),
+            pad: [0; 7],
+        })
     }
 }

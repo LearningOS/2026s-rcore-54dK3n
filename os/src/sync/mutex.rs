@@ -2,14 +2,14 @@
 
 use super::UPSafeCell;
 use crate::task::TaskControlBlock;
-use crate::task::{block_current_and_run_next, suspend_current_and_run_next};
+use crate::task::{block_current_and_run_next, current_process, suspend_current_and_run_next};
 use crate::task::{current_task, wakeup_task};
 use alloc::{collections::VecDeque, sync::Arc};
 
 /// Mutex trait
 pub trait Mutex: Sync + Send {
     /// Lock the mutex
-    fn lock(&self);
+    fn lock(&self) -> isize;
     /// Unlock the mutex
     fn unlock(&self);
 }
@@ -30,7 +30,7 @@ impl MutexSpin {
 
 impl Mutex for MutexSpin {
     /// Lock the spinlock mutex
-    fn lock(&self) {
+    fn lock(&self) -> isize {
         trace!("kernel: MutexSpin::lock");
         loop {
             let mut locked = self.locked.exclusive_access();
@@ -40,7 +40,7 @@ impl Mutex for MutexSpin {
                 continue;
             } else {
                 *locked = true;
-                return;
+                return 0;
             }
         }
     }
@@ -59,6 +59,7 @@ pub struct MutexBlocking {
 
 pub struct MutexBlockingInner {
     locked: bool,
+    owner_tid: Option<usize>,
     wait_queue: VecDeque<Arc<TaskControlBlock>>,
 }
 
@@ -70,6 +71,7 @@ impl MutexBlocking {
             inner: unsafe {
                 UPSafeCell::new(MutexBlockingInner {
                     locked: false,
+                    owner_tid: None,
                     wait_queue: VecDeque::new(),
                 })
             },
@@ -79,15 +81,29 @@ impl MutexBlocking {
 
 impl Mutex for MutexBlocking {
     /// lock the blocking mutex
-    fn lock(&self) {
+    fn lock(&self) -> isize {
         trace!("kernel: MutexBlocking::lock");
         let mut mutex_inner = self.inner.exclusive_access();
+        let current = current_task().unwrap();
+        let current_tid = current
+            .inner_exclusive_access()
+            .res
+            .as_ref()
+            .unwrap()
+            .tid;
         if mutex_inner.locked {
-            mutex_inner.wait_queue.push_back(current_task().unwrap());
+            let deadlock_enabled = current_process().inner_exclusive_access().deadlock_detect_enabled;
+            if deadlock_enabled && mutex_inner.owner_tid == Some(current_tid) {
+                return -0xdead;
+            }
+            mutex_inner.wait_queue.push_back(current);
             drop(mutex_inner);
             block_current_and_run_next();
+            0
         } else {
             mutex_inner.locked = true;
+            mutex_inner.owner_tid = Some(current_tid);
+            0
         }
     }
 
@@ -97,9 +113,18 @@ impl Mutex for MutexBlocking {
         let mut mutex_inner = self.inner.exclusive_access();
         assert!(mutex_inner.locked);
         if let Some(waking_task) = mutex_inner.wait_queue.pop_front() {
+            mutex_inner.owner_tid = Some(
+                waking_task
+                    .inner_exclusive_access()
+                    .res
+                    .as_ref()
+                    .unwrap()
+                    .tid,
+            );
             wakeup_task(waking_task);
         } else {
             mutex_inner.locked = false;
+            mutex_inner.owner_tid = None;
         }
     }
 }

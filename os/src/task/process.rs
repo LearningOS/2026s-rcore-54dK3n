@@ -49,6 +49,14 @@ pub struct ProcessControlBlockInner {
     pub semaphore_list: Vec<Option<Arc<Semaphore>>>,
     /// condvar list
     pub condvar_list: Vec<Option<Arc<Condvar>>>,
+    /// scheduling priority
+    pub priority: usize,
+    /// deadlock detection switch
+    pub deadlock_detect_enabled: bool,
+    /// per-thread semaphore allocations
+    pub semaphore_allocations: Vec<Vec<usize>>,
+    /// per-thread pending semaphore request
+    pub semaphore_requests: Vec<Option<usize>>,
 }
 
 impl ProcessControlBlockInner {
@@ -81,6 +89,18 @@ impl ProcessControlBlockInner {
     /// get a task with tid in this process
     pub fn get_task(&self, tid: usize) -> Arc<TaskControlBlock> {
         self.tasks[tid].as_ref().unwrap().clone()
+    }
+    /// make sure deadlock bookkeeping arrays match current tasks/semaphores
+    pub fn ensure_sync_tracking(&mut self) {
+        let task_len = self.tasks.len();
+        let sem_len = self.semaphore_list.len();
+        while self.semaphore_allocations.len() < task_len {
+            self.semaphore_allocations.push(vec![0; sem_len]);
+        }
+        for alloc in self.semaphore_allocations.iter_mut() {
+            alloc.resize(sem_len, 0);
+        }
+        self.semaphore_requests.resize(task_len, None);
     }
 }
 
@@ -119,6 +139,10 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    priority: 16,
+                    deadlock_detect_enabled: false,
+                    semaphore_allocations: Vec::new(),
+                    semaphore_requests: Vec::new(),
                 })
             },
         });
@@ -144,6 +168,7 @@ impl ProcessControlBlock {
         // add main thread to the process
         let mut process_inner = process.inner_exclusive_access();
         process_inner.tasks.push(Some(Arc::clone(&task)));
+        process_inner.ensure_sync_tracking();
         drop(process_inner);
         insert_into_pid2process(process.getpid(), Arc::clone(&process));
         // add main thread to scheduler
@@ -245,6 +270,10 @@ impl ProcessControlBlock {
                     mutex_list: Vec::new(),
                     semaphore_list: Vec::new(),
                     condvar_list: Vec::new(),
+                    priority: parent.priority,
+                    deadlock_detect_enabled: parent.deadlock_detect_enabled,
+                    semaphore_allocations: Vec::new(),
+                    semaphore_requests: Vec::new(),
                 })
             },
         });
@@ -267,6 +296,7 @@ impl ProcessControlBlock {
         // attach task to child process
         let mut child_inner = child.inner_exclusive_access();
         child_inner.tasks.push(Some(Arc::clone(&task)));
+        child_inner.ensure_sync_tracking();
         drop(child_inner);
         // modify kstack_top in trap_cx of this thread
         let task_inner = task.inner_exclusive_access();
@@ -276,6 +306,35 @@ impl ProcessControlBlock {
         insert_into_pid2process(child.getpid(), Arc::clone(&child));
         // add this thread to scheduler
         add_task(task);
+        child
+    }
+    /// spawn a child process from a fresh elf image
+    pub fn spawn(self: &Arc<Self>, elf_data: &[u8]) -> Arc<Self> {
+        let child = Self::new(elf_data);
+        let (fd_table, priority, deadlock_detect_enabled) = {
+            let parent = self.inner_exclusive_access();
+            let mut new_fd_table: Vec<Option<Arc<dyn File + Send + Sync>>> = Vec::new();
+            for fd in parent.fd_table.iter() {
+                if let Some(file) = fd {
+                    new_fd_table.push(Some(file.clone()));
+                } else {
+                    new_fd_table.push(None);
+                }
+            }
+            (
+                new_fd_table,
+                parent.priority,
+                parent.deadlock_detect_enabled,
+            )
+        };
+        {
+            let mut child_inner = child.inner_exclusive_access();
+            child_inner.parent = Some(Arc::downgrade(self));
+            child_inner.fd_table = fd_table;
+            child_inner.priority = priority;
+            child_inner.deadlock_detect_enabled = deadlock_detect_enabled;
+        }
+        self.inner_exclusive_access().children.push(Arc::clone(&child));
         child
     }
     /// get pid

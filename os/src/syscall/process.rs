@@ -1,18 +1,51 @@
 use crate::{
+    config::PAGE_SIZE,
     fs::{open_file, OpenFlags},
-    mm::{translated_ref, translated_refmut, translated_str},
+    mm::{
+        translated_ref, translated_refmut, translated_str, MapPermission, PageTable, StepByOne,
+        VirtAddr,
+    },
     task::{
         current_process, current_task, current_user_token, exit_current_and_run_next, pid2process,
         suspend_current_and_run_next, SignalFlags,
     },
+    timer::get_time_us,
 };
 use alloc::{string::String, sync::Arc, vec::Vec};
+use core::{arch::asm, mem::size_of};
 
 #[repr(C)]
 #[derive(Debug)]
 pub struct TimeVal {
     pub sec: usize,
     pub usec: usize,
+}
+
+fn copy_to_user<T>(token: usize, ptr: *mut T, value: &T) -> bool {
+    let page_table = PageTable::from_token(token);
+    let bytes =
+        unsafe { core::slice::from_raw_parts(value as *const T as *const u8, size_of::<T>()) };
+    let mut start = ptr as usize;
+    let Some(end) = start.checked_add(bytes.len()) else {
+        return false;
+    };
+    let mut copied = 0;
+    while start < end {
+        let start_va = VirtAddr::from(start);
+        let Some(pte) = page_table.translate(start_va.floor()) else {
+            return false;
+        };
+        if !pte.writable() {
+            return false;
+        }
+        let writable_len = (PAGE_SIZE - start_va.page_offset()).min(end - start);
+        let dst = &mut pte.ppn().get_bytes_array()
+            [start_va.page_offset()..start_va.page_offset() + writable_len];
+        dst.copy_from_slice(&bytes[copied..copied + writable_len]);
+        start += writable_len;
+        copied += writable_len;
+    }
+    true
 }
 
 /// exit syscall
@@ -147,38 +180,107 @@ pub fn sys_kill(pid: usize, signal: u32) -> isize {
 }
 
 /// get_time syscall
-///
-/// YOUR JOB: get time with second and microsecond
-/// HINT: You might reimplement it with virtual memory management.
-/// HINT: What if [`TimeVal`] is splitted by two pages ?
-pub fn sys_get_time(_ts: *mut TimeVal, _tz: usize) -> isize {
+pub fn sys_get_time(ts: *mut TimeVal, _tz: usize) -> isize {
     trace!(
-        "kernel:pid[{}] sys_get_time NOT IMPLEMENTED",
+        "kernel:pid[{}] sys_get_time",
         current_task().unwrap().process.upgrade().unwrap().getpid()
     );
-    -1
+    let us = get_time_us();
+    let time_val = TimeVal {
+        sec: us / 1_000_000,
+        usec: us % 1_000_000,
+    };
+    if copy_to_user(current_user_token(), ts, &time_val) {
+        0
+    } else {
+        -1
+    }
 }
 
 /// mmap syscall
-///
-/// YOUR JOB: Implement mmap.
-pub fn sys_mmap(_start: usize, _len: usize, _port: usize) -> isize {
+pub fn sys_mmap(start: usize, len: usize, port: usize) -> isize {
     trace!(
-        "kernel:pid[{}] sys_mmap NOT IMPLEMENTED",
+        "kernel:pid[{}] sys_mmap",
         current_task().unwrap().process.upgrade().unwrap().getpid()
     );
-    -1
+    if start % PAGE_SIZE != 0 || port & !0x7 != 0 || port & 0x7 == 0 {
+        return -1;
+    }
+    if len == 0 {
+        return 0;
+    }
+    let Some(end) = start.checked_add(len) else {
+        return -1;
+    };
+    let start_vpn = VirtAddr::from(start).floor();
+    let end_vpn = VirtAddr::from(end).ceil();
+    let process = current_process();
+    let mut inner = process.inner_exclusive_access();
+    let mut vpn = start_vpn;
+    while vpn < end_vpn {
+        if inner
+            .memory_set
+            .translate(vpn)
+            .map_or(false, |pte| pte.is_valid())
+        {
+            return -1;
+        }
+        vpn.step();
+    }
+    let mut permission = MapPermission::U;
+    if port & 0x1 != 0 {
+        permission |= MapPermission::R;
+    }
+    if port & 0x2 != 0 {
+        permission |= MapPermission::W;
+    }
+    if port & 0x4 != 0 {
+        permission |= MapPermission::X;
+    }
+    inner
+        .memory_set
+        .insert_framed_area(VirtAddr::from(start), VirtAddr::from(end), permission);
+    unsafe {
+        asm!("sfence.vma");
+    }
+    0
 }
 
 /// munmap syscall
-///
-/// YOUR JOB: Implement munmap.
-pub fn sys_munmap(_start: usize, _len: usize) -> isize {
+pub fn sys_munmap(start: usize, len: usize) -> isize {
     trace!(
-        "kernel:pid[{}] sys_munmap NOT IMPLEMENTED",
+        "kernel:pid[{}] sys_munmap",
         current_task().unwrap().process.upgrade().unwrap().getpid()
     );
-    -1
+    if start % PAGE_SIZE != 0 {
+        return -1;
+    }
+    if len == 0 {
+        return 0;
+    }
+    let Some(end) = start.checked_add(len) else {
+        return -1;
+    };
+    let start_vpn = VirtAddr::from(start).floor();
+    let end_vpn = VirtAddr::from(end).ceil();
+    let process = current_process();
+    let mut inner = process.inner_exclusive_access();
+    let mut vpn = start_vpn;
+    while vpn < end_vpn {
+        if inner
+            .memory_set
+            .translate(vpn)
+            .map_or(true, |pte| !pte.is_valid())
+        {
+            return -1;
+        }
+        vpn.step();
+    }
+    if inner.memory_set.remove_framed_area(start_vpn, end_vpn) {
+        0
+    } else {
+        -1
+    }
 }
 
 /// change data segment size
@@ -191,23 +293,32 @@ pub fn sys_munmap(_start: usize, _len: usize) -> isize {
 // }
 
 /// spawn syscall
-/// YOUR JOB: Implement spawn.
-/// HINT: fork + exec =/= spawn
-pub fn sys_spawn(_path: *const u8) -> isize {
+pub fn sys_spawn(path: *const u8) -> isize {
     trace!(
-        "kernel:pid[{}] sys_spawn NOT IMPLEMENTED",
+        "kernel:pid[{}] sys_spawn",
         current_task().unwrap().process.upgrade().unwrap().getpid()
     );
-    -1
+    let token = current_user_token();
+    let path = translated_str(token, path);
+    if let Some(app_inode) = open_file(path.as_str(), OpenFlags::RDONLY) {
+        let all_data = app_inode.read_all();
+        let current_process = current_process();
+        let new_process = current_process.spawn(all_data.as_slice());
+        new_process.getpid() as isize
+    } else {
+        -1
+    }
 }
 
 /// set priority syscall
-///
-/// YOUR JOB: Set task priority
-pub fn sys_set_priority(_prio: isize) -> isize {
+pub fn sys_set_priority(prio: isize) -> isize {
     trace!(
-        "kernel:pid[{}] sys_set_priority NOT IMPLEMENTED",
+        "kernel:pid[{}] sys_set_priority",
         current_task().unwrap().process.upgrade().unwrap().getpid()
     );
-    -1
+    if prio <= 1 {
+        return -1;
+    }
+    current_process().inner_exclusive_access().priority = prio as usize;
+    prio
 }

@@ -110,7 +110,7 @@ impl VirtAddr {
 
     /// Get the (ceil) virtual page number
     pub fn ceil(&self) -> VirtPageNum {
-        VirtPageNum((self.0 - 1 + PAGE_SIZE) / PAGE_SIZE)
+        VirtPageNum((self.0 + PAGE_SIZE - 1) / PAGE_SIZE)
     }
 
     /// Get the page offset of virtual address
@@ -141,7 +141,7 @@ impl PhysAddr {
     }
     /// Get the (ceil) physical page number
     pub fn ceil(&self) -> PhysPageNum {
-        PhysPageNum((self.0 - 1 + PAGE_SIZE) / PAGE_SIZE)
+        PhysPageNum((self.0 + PAGE_SIZE - 1) / PAGE_SIZE)
     }
     /// Get the page offset of physical address
     pub fn page_offset(&self) -> usize {

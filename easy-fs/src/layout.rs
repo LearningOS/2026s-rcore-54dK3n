@@ -68,7 +68,7 @@ impl SuperBlock {
     }
 }
 /// Type of a disk inode
-#[derive(PartialEq)]
+#[derive(Copy, Clone, PartialEq)]
 pub enum DiskInodeType {
     File,
     Directory,
@@ -86,6 +86,7 @@ pub struct DiskInode {
     pub indirect1: u32,
     pub indirect2: u32,
     type_: DiskInodeType,
+    nlink: u32,
 }
 
 impl DiskInode {
@@ -97,6 +98,7 @@ impl DiskInode {
         self.indirect1 = 0;
         self.indirect2 = 0;
         self.type_ = type_;
+        self.nlink = 1;
     }
     /// Whether this inode is a directory
     pub fn is_dir(&self) -> bool {
@@ -106,6 +108,19 @@ impl DiskInode {
     #[allow(unused)]
     pub fn is_file(&self) -> bool {
         self.type_ == DiskInodeType::File
+    }
+    /// Get the hard link count of this inode.
+    pub fn nlink(&self) -> u32 {
+        self.nlink
+    }
+    /// Increase the hard link count of this inode.
+    pub fn inc_nlink(&mut self) {
+        self.nlink += 1;
+    }
+    /// Decrease the hard link count of this inode.
+    pub fn dec_nlink(&mut self) {
+        assert!(self.nlink > 0);
+        self.nlink -= 1;
     }
     /// Return block number correspond to size.
     pub fn data_blocks(&self) -> u32 {

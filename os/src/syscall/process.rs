@@ -6,7 +6,9 @@ use core::mem::size_of;
 use crate::{
     config::PAGE_SIZE,
     fs::{open_file, OpenFlags},
-    mm::{translated_refmut, translated_str, MapPermission, PageTable, StepByOne, VirtAddr},
+    mm::{
+        flush_tlb, translated_refmut, translated_str, MapPermission, PageTable, StepByOne, VirtAddr,
+    },
     task::{
         add_task, current_task, current_user_token, exit_current_and_run_next,
         suspend_current_and_run_next,
@@ -185,7 +187,7 @@ pub fn sys_mmap(start: usize, len: usize, port: usize) -> isize {
     inner
         .memory_set
         .insert_framed_area(VirtAddr::from(start), VirtAddr::from(end), permission);
-    inner.memory_set.activate();
+    flush_tlb();
     0
 }
 
@@ -213,7 +215,7 @@ pub fn sys_munmap(start: usize, len: usize) -> isize {
         vpn.step();
     }
     if inner.memory_set.remove_framed_area(start_vpn, end_vpn) {
-        inner.memory_set.activate();
+        flush_tlb();
         0
     } else {
         -1

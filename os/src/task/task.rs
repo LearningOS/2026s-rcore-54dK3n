@@ -3,7 +3,7 @@ use super::TaskContext;
 use super::{kstack_alloc, pid_alloc, KernelStack, PidHandle};
 use crate::config::TRAP_CONTEXT_BASE;
 use crate::fs::{File, Stdin, Stdout};
-use crate::mm::{MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
+use crate::mm::{flush_tlb, MemorySet, PhysPageNum, VirtAddr, KERNEL_SPACE};
 use crate::sync::UPSafeCell;
 use crate::trap::{trap_handler, TrapContext};
 use alloc::sync::{Arc, Weak};
@@ -331,7 +331,7 @@ impl TaskControlBlock {
                 .append_to(VirtAddr(heap_bottom), VirtAddr(new_brk as usize))
         };
         if result {
-            inner.memory_set.activate();
+            flush_tlb();
             inner.program_brk = new_brk as usize;
             Some(old_break)
         } else {

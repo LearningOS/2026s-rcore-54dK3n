@@ -23,6 +23,13 @@ pub use page_table::{
     PageTableEntry, UserBuffer, UserBufferIterator,
 };
 
+/// Flush TLB entries on the current hart after page table updates.
+pub fn flush_tlb() {
+    unsafe {
+        core::arch::asm!("sfence.vma", options(nostack));
+    }
+}
+
 /// initiate heap allocator, frame allocator and kernel space
 pub fn init() {
     heap_allocator::init_heap();

@@ -84,15 +84,38 @@ impl MemorySet {
         start_vpn: VirtPageNum,
         end_vpn: VirtPageNum,
     ) -> bool {
-        if let Some((idx, area)) = self.areas.iter_mut().enumerate().find(|(_, area)| {
-            area.vpn_range.get_start() == start_vpn && area.vpn_range.get_end() == end_vpn
-        }) {
-            area.unmap(&mut self.page_table);
-            self.areas.remove(idx);
-            true
-        } else {
-            false
+        let mut idx = 0;
+        let mut removed = false;
+        while idx < self.areas.len() {
+            let area_start = self.areas[idx].vpn_range.get_start();
+            let area_end = self.areas[idx].vpn_range.get_end();
+            let overlap_start = area_start.max(start_vpn);
+            let overlap_end = area_end.min(end_vpn);
+            if overlap_start >= overlap_end {
+                idx += 1;
+                continue;
+            }
+            removed = true;
+            if overlap_start == area_start && overlap_end == area_end {
+                self.areas[idx].unmap(&mut self.page_table);
+                self.areas.remove(idx);
+                continue;
+            }
+            if overlap_start == area_start {
+                self.areas[idx].shrink_left(&mut self.page_table, overlap_end);
+                idx += 1;
+                continue;
+            }
+            if overlap_end == area_end {
+                self.areas[idx].shrink_to(&mut self.page_table, overlap_start);
+                idx += 1;
+                continue;
+            }
+            let right = self.areas[idx].split_off(&mut self.page_table, overlap_start, overlap_end);
+            self.areas.insert(idx + 1, right);
+            idx += 2;
         }
+        removed
     }
     /// Add a new MapArea into this MemorySet.
     /// Assuming that there are no conflicts in the virtual address
@@ -398,12 +421,40 @@ impl MapArea {
             self.unmap_one(page_table, vpn);
         }
     }
+    fn shrink_left(&mut self, page_table: &mut PageTable, new_start: VirtPageNum) {
+        for vpn in VPNRange::new(self.vpn_range.get_start(), new_start) {
+            self.unmap_one(page_table, vpn);
+        }
+        self.vpn_range = VPNRange::new(new_start, self.vpn_range.get_end());
+    }
     #[allow(unused)]
     pub fn shrink_to(&mut self, page_table: &mut PageTable, new_end: VirtPageNum) {
         for vpn in VPNRange::new(new_end, self.vpn_range.get_end()) {
             self.unmap_one(page_table, vpn)
         }
         self.vpn_range = VPNRange::new(self.vpn_range.get_start(), new_end);
+    }
+    fn split_off(
+        &mut self,
+        page_table: &mut PageTable,
+        middle_start: VirtPageNum,
+        middle_end: VirtPageNum,
+    ) -> Self {
+        let old_end = self.vpn_range.get_end();
+        for vpn in VPNRange::new(middle_start, middle_end) {
+            self.unmap_one(page_table, vpn);
+        }
+        let mut right = Self {
+            vpn_range: VPNRange::new(middle_end, old_end),
+            data_frames: BTreeMap::new(),
+            map_type: self.map_type,
+            map_perm: self.map_perm,
+        };
+        if self.map_type == MapType::Framed {
+            right.data_frames = self.data_frames.split_off(&middle_end);
+        }
+        self.vpn_range = VPNRange::new(self.vpn_range.get_start(), middle_start);
+        right
     }
     #[allow(unused)]
     pub fn append_to(&mut self, page_table: &mut PageTable, new_end: VirtPageNum) {

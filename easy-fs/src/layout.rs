@@ -68,6 +68,7 @@ impl SuperBlock {
     }
 }
 /// Type of a disk inode
+#[repr(u16)]
 #[derive(Copy, Clone, PartialEq)]
 pub enum DiskInodeType {
     File,
@@ -86,7 +87,7 @@ pub struct DiskInode {
     pub indirect1: u32,
     pub indirect2: u32,
     type_: DiskInodeType,
-    nlink: u32,
+    nlink: u16,
 }
 
 impl DiskInode {
@@ -111,7 +112,7 @@ impl DiskInode {
     }
     /// Get the hard link count of this inode.
     pub fn nlink(&self) -> u32 {
-        self.nlink
+        self.nlink as u32
     }
     /// Increase the hard link count of this inode.
     pub fn inc_nlink(&mut self) {

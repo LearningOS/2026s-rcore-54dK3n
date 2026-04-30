@@ -177,7 +177,7 @@ pub fn sys_mmap(start: usize, len: usize, port: usize) -> isize {
         permission |= MapPermission::R;
     }
     if port & 0x2 != 0 {
-        permission |= MapPermission::R | MapPermission::W;
+        permission |= MapPermission::W;
     }
     if port & 0x4 != 0 {
         permission |= MapPermission::X;

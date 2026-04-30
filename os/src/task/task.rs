@@ -331,6 +331,7 @@ impl TaskControlBlock {
                 .append_to(VirtAddr(heap_bottom), VirtAddr(new_brk as usize))
         };
         if result {
+            inner.memory_set.activate();
             inner.program_brk = new_brk as usize;
             Some(old_break)
         } else {

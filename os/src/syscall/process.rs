@@ -185,6 +185,7 @@ pub fn sys_mmap(start: usize, len: usize, port: usize) -> isize {
     inner
         .memory_set
         .insert_framed_area(VirtAddr::from(start), VirtAddr::from(end), permission);
+    inner.memory_set.activate();
     0
 }
 
@@ -212,6 +213,7 @@ pub fn sys_munmap(start: usize, len: usize) -> isize {
         vpn.step();
     }
     if inner.memory_set.remove_framed_area(start_vpn, end_vpn) {
+        inner.memory_set.activate();
         0
     } else {
         -1

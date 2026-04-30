@@ -169,7 +169,11 @@ pub fn sys_mmap(start: usize, len: usize, port: usize) -> isize {
     let mut inner = task.inner_exclusive_access();
     let mut vpn = start_vpn;
     while vpn < end_vpn {
-        if inner.memory_set.translate(vpn).is_some() {
+        if inner
+            .memory_set
+            .translate(vpn)
+            .map_or(false, |pte| pte.is_valid())
+        {
             return -1;
         }
         vpn.step();
@@ -209,7 +213,11 @@ pub fn sys_munmap(start: usize, len: usize) -> isize {
     let mut inner = task.inner_exclusive_access();
     let mut vpn = start_vpn;
     while vpn < end_vpn {
-        if inner.memory_set.translate(vpn).is_none() {
+        if inner
+            .memory_set
+            .translate(vpn)
+            .map_or(true, |pte| !pte.is_valid())
+        {
             return -1;
         }
         vpn.step();
